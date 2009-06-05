@@ -1,556 +1,233 @@
-/* See LICENSE file for copyright and license details.
- *
- * To understand surf, start reading main().
- */
-#include <X11/X.h>
-#include <X11/Xatom.h>
 #include <gtk/gtk.h>
-#include <gdk/gdkx.h>
-#include <gdk/gdk.h>
-#include <gdk/gdkkeysyms.h>
 #include <string.h>
 #include <unistd.h>
-#include <getopt.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <webkit/webkit.h>
-#include <glib/gstdio.h>
 
 #define LENGTH(x) (sizeof x / sizeof x[0])
+/* Plan9-style Argument parsing */
+/* Vars: _c -> count; _b -> break; _a -> argument */
+#define ARG int _c, _b; char *_a; \
+	for(_c = 1; _c < argc && argv[_c][0] == '-' && argv[_c][1] && \
+			(strcmp(argv[_c], "--") != 0); _c++) \
+		for(_a = &argv[_c][1], _b = 0; !_b && *_a; _a++ ) \
+			switch(*_a)
+#define ARGVAL()	(!_b && _a[1] && (_b = 1) ? &_a[1] : _c + 1 == argc ? \
+		0 : argv[++_c])
+#define ARGCHR()	(*_a)
+#define ARGC()		_c
 
-Display *dpy;
-Atom urlprop;
-typedef struct Client {
-	GtkWidget *win, *scroll, *vbox, *urlbar, *searchbar;
-	WebKitWebView *view;
-	WebKitDownload *download;
-	gchar *title;
-	gint progress;
-	struct Client *next;
-} Client;
-SoupCookieJar *cookiejar;
-Client *clients = NULL;
+GtkWidget *win;
+GtkWidget *browser;
+WebKitWebView *view;
+gchar *title;
+gint progress = 100;
 gboolean embed = FALSE;
-gboolean showxid = FALSE;
-gboolean ignore_once = FALSE;
-extern char *optarg;
-extern int optind;
 
-static void cleanup(void);
-static void destroyclient(Client *c);
-static void destroywin(GtkWidget* w, Client *c);
-static void die(char *str);
-static void download(WebKitDownload *o, GParamSpec *pspec, Client *c);
-static gboolean initdownload(WebKitWebView *view, WebKitDownload *o, Client *c);
-static gchar *geturi(Client *c);
-static void hidesearch(Client *c);
-static void hideurl(Client *c);
-static gboolean keypress(GtkWidget* w, GdkEventKey *ev, Client *c);
-static void linkhover(WebKitWebView* page, const gchar* t, const gchar* l, Client *c);
-static void loadcommit(WebKitWebView *view, WebKitWebFrame *f, Client *c);
-static void loadstart(WebKitWebView *view, WebKitWebFrame *f, Client *c);
-static void loadfile(Client *c, const gchar *f);
-static void loaduri(Client *c, const gchar *uri);
-static Client *newclient();
-static WebKitWebView *newwindow(WebKitWebView  *v, WebKitWebFrame *f, Client *c);
-static void pasteurl(GtkClipboard *clipboard, const gchar *text, gpointer d);
-static GdkFilterReturn processx(GdkXEvent *xevent, GdkEvent *event, gpointer d);
-static void progresschange(WebKitWebView *view, gint p, Client *c);
 static void setup(void);
-static void showsearch(Client *c);
-static void showurl(Client *c);
-static void stop(Client *c);
-static void titlechange(WebKitWebView* view, WebKitWebFrame* frame, const gchar* title, Client *c);
-static void usage();
-static void updatetitle(Client *c, const gchar *title);
-
-void
-cleanup(void) {
-	while(clients)
-		destroyclient(clients);
-}
-
-void
-destroyclient(Client *c) {
-	Client *p;
-
-	gtk_widget_destroy(GTK_WIDGET(webkit_web_view_new()));
-	gtk_widget_destroy(c->scroll);
-	gtk_widget_destroy(c->urlbar);
-	gtk_widget_destroy(c->searchbar);
-	gtk_widget_destroy(c->vbox);
-	gtk_widget_destroy(c->win);
-	for(p = clients; p && p->next != c; p = p->next);
-	if(p)
-		p->next = c->next;
-	else
-		clients = c->next;
-	free(c);
-	if(clients == NULL)
-		gtk_main_quit();
-}
-
-void
-destroywin(GtkWidget* w, Client *c) {
-	destroyclient(c);
-}
-
-void
-die(char *str) {
-	fputs(str, stderr);
-	exit(EXIT_FAILURE);
-}
-
-void
-download(WebKitDownload *o, GParamSpec *pspec, Client *c) {
-	WebKitDownloadStatus status;
-
-	status = webkit_download_get_status(c->download);
-	if(status == WEBKIT_DOWNLOAD_STATUS_STARTED || status == WEBKIT_DOWNLOAD_STATUS_CREATED) {
-		c->progress = (int)(webkit_download_get_progress(c->download)*100);
-	}
-	updatetitle(c, NULL);
-}
+static void cleanup(void);
+static void updatetitle(void);
+static void windestroy(GtkWidget* w, gpointer d);
+static gboolean keypress(GtkWidget* w, GdkEventKey *ev);
+static void titlechange(WebKitWebView* view, WebKitWebFrame* frame, const gchar* title, gpointer d);
+static void progresschange(WebKitWebView *view, gint p, gpointer d);
+static void loadcommit(WebKitWebView *view, WebKitWebFrame *f, gpointer d);
+static void loadstart(WebKitWebView *view, WebKitWebFrame *f, gpointer d);
+static void loadfinish(WebKitWebView *view, WebKitWebFrame *f, gpointer d);
+static void linkhover(WebKitWebView* page, const gchar* t, const gchar* l, gpointer d);
+static gboolean newwindow(WebKitWebView *view, WebKitWebFrame *f,
+		WebKitNetworkRequest *r, WebKitWebNavigationAction *n,
+		WebKitWebPolicyDecision *p, gpointer d);
+static gboolean download(WebKitWebView *view, GObject *o, gpointer d);
+static void loaduri(gchar *uri);
+static void loadfile(gchar *f);
+static void setupstdin();
+static gboolean readstdin(GIOChannel *c, GIOCondition con);
 
 gboolean
-initdownload(WebKitWebView *view, WebKitDownload *o, Client *c) {
-	const gchar *home, *filename;
-	gchar *uri, *path, *html;
+readstdin(GIOChannel *c, GIOCondition con) {
+	gchar *line, *p;
+	GIOStatus ret;
 
-	stop(c);
-	c->download = o;
-	home = g_get_home_dir();
-	filename = webkit_download_get_suggested_filename(o);
-	path = g_build_filename(home, ".surf", "dl", 
-			filename, NULL);
-	uri = g_strconcat("file://", path, NULL);
-	webkit_download_set_destination_uri(c->download, uri);
-	c->progress = 0;
-	g_free(uri);
-	html = g_strdup_printf("Download <b>%s</b>...", filename);
-	webkit_web_view_load_html_string(c->view, html,
-			webkit_download_get_uri(c->download));
-	g_signal_connect(c->download, "notify::progress", G_CALLBACK(download), c);
-	g_signal_connect(c->download, "notify::status", G_CALLBACK(download), c);
-	webkit_download_start(c->download);
-	updatetitle(c, filename);
-	g_free(html);
+	ret = g_io_channel_read_line(c, &line, NULL, NULL, NULL);
+	if(ret == G_IO_STATUS_ERROR || ret == G_IO_STATUS_EOF)
+		return FALSE;
+	for(p = line; *p && *p != '\n'; p++);
+	*p = '\0';
+	loaduri(line);
+	g_free(line);
 	return TRUE;
 }
 
-gchar *
-geturi(Client *c) {
-	gchar *uri;
+void
+setupstdin() {
+	GIOChannel *c = NULL;
 
-	if(!(uri = (gchar *)webkit_web_view_get_uri(c->view)))
-		uri = g_strdup("about:blank");
-	return uri;
+	c = g_io_channel_unix_new(STDIN_FILENO);
+	if(c && !g_io_add_watch(c, G_IO_IN|G_IO_HUP, (GIOFunc) readstdin, NULL))
+			g_error("Stdin: could not add watch\n");
 }
 
 void
-hidesearch(Client *c) {
-	gtk_widget_hide(c->searchbar);
-	gtk_widget_grab_focus(GTK_WIDGET(c->view));
+loadfile(gchar *f) {
+	GIOChannel *c = NULL;
+	GError *e = NULL;
+	GString *code = g_string_new("");
+	gchar *line;
+
+	/* cannot use fileno in c99 - workaround*/
+	if(strcmp(f, "-") == 0)
+		c = g_io_channel_unix_new(STDIN_FILENO);
+	else
+		c = g_io_channel_new_file(f, "r", NULL);
+	if (c) {
+		while(g_io_channel_read_line(c, &line, NULL, NULL, &e) == G_IO_STATUS_NORMAL) {
+			g_string_append(code, line);
+			g_free(line);
+		}
+		webkit_web_view_load_html_string(view, code->str, NULL);
+		g_io_channel_shutdown(c, FALSE, NULL);
+	}
 }
 
-void
-hideurl(Client *c) {
-	gtk_widget_hide(c->urlbar);
-	gtk_widget_grab_focus(GTK_WIDGET(c->view));
+static void loaduri(gchar *uri) {
+	GString* u = g_string_new(uri);
+	if(g_strrstr(u->str, "://") == NULL)
+		g_string_prepend(u, "http://");
+	webkit_web_view_load_uri(view, u->str);
+	g_string_free(u, TRUE);
 }
 
 gboolean
-keypress(GtkWidget* w, GdkEventKey *ev, Client *c) {
-	if(ev->type != GDK_KEY_PRESS)
-		return FALSE;
-	if(GTK_WIDGET_HAS_FOCUS(c->searchbar)) {
-		switch(ev->keyval) {
-		case GDK_Escape:
-			hidesearch(c);
-			return TRUE;
-		case GDK_Return:
-			webkit_web_view_search_text(c->view,
-					gtk_entry_get_text(GTK_ENTRY(c->searchbar)),
-					FALSE,
-					!(ev->state & GDK_SHIFT_MASK),
-					TRUE);
-			return TRUE;
-		case GDK_Left:
-		case GDK_Right:
-			return FALSE;
-		}
-	}
-	else if(GTK_WIDGET_HAS_FOCUS(c->urlbar)) {
-		switch(ev->keyval) {
-		case GDK_Escape:
-			hideurl(c);
-			return TRUE;
-		case GDK_Return:
-			loaduri(c, gtk_entry_get_text(GTK_ENTRY(c->urlbar)));
-			hideurl(c);
-			return TRUE;
-		case GDK_Left:
-		case GDK_Right:
-			return FALSE;
-		}
-	}
-	if(ev->state & GDK_CONTROL_MASK) {
-		switch(ev->keyval) {
-		case GDK_p:
-			gtk_clipboard_request_text(gtk_clipboard_get(GDK_SELECTION_PRIMARY), pasteurl, c);
-			return TRUE;
-		case GDK_y:
-			gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_PRIMARY), webkit_web_view_get_uri(c->view), -1);
-			return TRUE;
-		case GDK_r:
-		case GDK_R:
-			if((ev->state & GDK_SHIFT_MASK))
-				 webkit_web_view_reload_bypass_cache(c->view);
-			else
-				 webkit_web_view_reload(c->view);
-			return TRUE;
-		case GDK_b:
-			return TRUE;
-		case GDK_g:
-			showurl(c);
-			return TRUE;
-		case GDK_slash:
-			showsearch(c);
-			return TRUE;
-		case GDK_plus:
-		case GDK_equal:
-			webkit_web_view_zoom_in(c->view);
-			return TRUE;
-		case GDK_minus:
-			webkit_web_view_zoom_out(c->view);
-			return TRUE;
-		case GDK_0:
-			webkit_web_view_set_zoom_level(c->view, 1.0);
-			return TRUE;
-		case GDK_n:
-		case GDK_N:
-			webkit_web_view_search_text(c->view,
-					gtk_entry_get_text(GTK_ENTRY(c->searchbar)),
-					FALSE,
-					!(ev->state & GDK_SHIFT_MASK),
-					TRUE);
-			return TRUE;
-		case GDK_Left:
-			webkit_web_view_go_back(c->view);
-			return TRUE;
-		case GDK_Right:
-			webkit_web_view_go_forward(c->view);
-			return TRUE;
-		}
-	}
-	else {
-		switch(ev->keyval) {
-		case GDK_Escape:
-			stop(c);
-			return TRUE;
-		}
-	}
+download(WebKitWebView *view, GObject *o, gpointer d) {
+	/* TODO */
 	return FALSE;
 }
 
-void
-linkhover(WebKitWebView* page, const gchar* t, const gchar* l, Client *c) {
-	if(l)
-		gtk_window_set_title(GTK_WINDOW(c->win), l);
-	else
-		updatetitle(c, NULL);
+gboolean
+newwindow(WebKitWebView *view, WebKitWebFrame *f,
+		WebKitNetworkRequest *r, WebKitWebNavigationAction *n,
+		WebKitWebPolicyDecision *p, gpointer d) {
+	/* TODO */
+	return FALSE;
 }
-
 void
-loadcommit(WebKitWebView *view, WebKitWebFrame *f, Client *c) {
-	gchar *uri;
-
-	ignore_once = TRUE;
-	uri = geturi(c);
-	XChangeProperty(dpy, GDK_WINDOW_XID(GTK_WIDGET(c->win)->window), urlprop,
-			XA_STRING, 8, PropModeReplace, (unsigned char *)uri,
-			strlen(uri) + 1);
+linkhover(WebKitWebView* page, const gchar* t, const gchar* l, gpointer d) {
+	/* TODO */
 }
 
 void
-loadstart(WebKitWebView *view, WebKitWebFrame *f, Client *c) {
-	c->progress = 0;
-	updatetitle(c, NULL);
+loadstart(WebKitWebView *view, WebKitWebFrame *f, gpointer d) {
+	/* ??? TODO */
 }
 
 void
-loadfile(Client *c, const gchar *f) {
-	GIOChannel *chan = NULL;
-	GError *e = NULL;
-	GString *code;
-	gchar *line, *uri;
-
-	if(strcmp(f, "-") == 0) {
-		chan = g_io_channel_unix_new(STDIN_FILENO);
-		if (chan) {
-			code = g_string_new("");
-			while(g_io_channel_read_line(chan, &line, NULL, NULL,
-						&e) == G_IO_STATUS_NORMAL) {
-				g_string_append(code, line);
-				g_free(line);
-			}
-			webkit_web_view_load_html_string(c->view, code->str,
-					"file://.");
-			g_io_channel_shutdown(chan, FALSE, NULL);
-			g_string_free(code, TRUE);
-		}
-		uri = g_strdup("stdin");
-	}
-	else {
-		uri = g_strdup_printf("file://%s", f);
-		loaduri(c, uri);
-	}
-	updatetitle(c, uri);
-	g_free(uri);
+loadcommit(WebKitWebView *view, WebKitWebFrame *f, gpointer d) {
+	/* ??? TODO */
 }
 
 void
-loaduri(Client *c, const gchar *uri) {
-	gchar *u;
-	u = g_strrstr(uri, ":") ? g_strdup(uri)
-		: g_strdup_printf("http://%s", uri);
-	webkit_web_view_load_uri(c->view, u);
-	c->progress = 0;
-	updatetitle(c, u);
-	g_free(u);
-}
-
-Client *
-newclient(void) {
-	Client *c;
-	if(!(c = calloc(1, sizeof(Client))))
-		die("Cannot malloc!\n");
-	/* Window */
-	if(embed) {
-		c->win = gtk_plug_new(0);
-	}
-	else {
-		c->win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-		gtk_window_set_wmclass(GTK_WINDOW(c->win), "surf", "surf");
-	}
-	gtk_window_set_default_size(GTK_WINDOW(c->win), 800, 600);
-	g_signal_connect(G_OBJECT(c->win), "destroy", G_CALLBACK(destroywin), c);
-	g_signal_connect(G_OBJECT(c->win), "key-press-event", G_CALLBACK(keypress), c);
-
-	/* VBox */
-	c->vbox = gtk_vbox_new(FALSE, 0);
-
-	/* scrolled window */
-	c->scroll = gtk_scrolled_window_new(NULL, NULL);
-	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(c->scroll),
-			GTK_POLICY_NEVER, GTK_POLICY_NEVER);
-
-	/* webview */
-	c->view = WEBKIT_WEB_VIEW(webkit_web_view_new());
-	g_signal_connect(G_OBJECT(c->view), "title-changed", G_CALLBACK(titlechange), c);
-	g_signal_connect(G_OBJECT(c->view), "load-progress-changed", G_CALLBACK(progresschange), c);
-	g_signal_connect(G_OBJECT(c->view), "load-committed", G_CALLBACK(loadcommit), c);
-	g_signal_connect(G_OBJECT(c->view), "load-started", G_CALLBACK(loadstart), c);
-	g_signal_connect(G_OBJECT(c->view), "hovering-over-link", G_CALLBACK(linkhover), c);
-	g_signal_connect(G_OBJECT(c->view), "create-web-view", G_CALLBACK(newwindow), c);
-	g_signal_connect(G_OBJECT(c->view), "download-requested", G_CALLBACK(initdownload), c);
-
-	/* urlbar */
-	c->urlbar = gtk_entry_new();
-	gtk_entry_set_has_frame(GTK_ENTRY(c->urlbar), FALSE);
-
-	/* searchbar */
-	c->searchbar = gtk_entry_new();
-	gtk_entry_set_has_frame(GTK_ENTRY(c->searchbar), FALSE);
-
-	/* downloadbar */
-
-	/* Arranging */
-	gtk_container_add(GTK_CONTAINER(c->scroll), GTK_WIDGET(c->view));
-	gtk_container_add(GTK_CONTAINER(c->win), c->vbox);
-	gtk_container_add(GTK_CONTAINER(c->vbox), c->scroll);
-	gtk_container_add(GTK_CONTAINER(c->vbox), c->searchbar);
-	gtk_container_add(GTK_CONTAINER(c->vbox), c->urlbar);
-
-	/* Setup */
-	gtk_box_set_child_packing(GTK_BOX(c->vbox), c->urlbar, FALSE, FALSE, 0, GTK_PACK_START);
-	gtk_box_set_child_packing(GTK_BOX(c->vbox), c->searchbar, FALSE, FALSE, 0, GTK_PACK_START);
-	gtk_box_set_child_packing(GTK_BOX(c->vbox), c->scroll, TRUE, TRUE, 0, GTK_PACK_START);
-	gtk_widget_grab_focus(GTK_WIDGET(c->view));
-	gtk_widget_hide_all(c->searchbar);
-	gtk_widget_hide_all(c->urlbar);
-	gtk_widget_show(c->vbox);
-	gtk_widget_show(c->scroll);
-	gtk_widget_show(GTK_WIDGET(c->view));
-	gtk_widget_show(c->win);
-	gdk_window_set_events(GTK_WIDGET(c->win)->window, GDK_ALL_EVENTS_MASK);
-	gdk_window_add_filter(GTK_WIDGET(c->win)->window, processx, c);
-	webkit_web_view_set_full_content_zoom(c->view, TRUE);
-	c->download = NULL;
-	c->title = NULL;
-	c->next = clients;
-	clients = c;
-	if(showxid)
-		printf("%u\n", (unsigned int)GDK_WINDOW_XID(GTK_WIDGET(c->win)->window));
-	return c;
-}
-
-WebKitWebView *
-newwindow(WebKitWebView  *v, WebKitWebFrame *f, Client *c) {
-	Client *n = newclient();
-	return n->view;
-}
-
- 
-void
-pasteurl(GtkClipboard *clipboard, const gchar *text, gpointer d) {
-	if(text != NULL)
-		loaduri((Client *) d, text);
-}
-
-GdkFilterReturn
-processx(GdkXEvent *e, GdkEvent *event, gpointer d) {
-	Client *c = (Client *)d;
-	XPropertyEvent *ev;
-	Atom adummy;
-	int idummy;
-	unsigned long ldummy;
-	unsigned char *buf = NULL;
-	if(((XEvent *)e)->type == PropertyNotify) {
-		ev = &((XEvent *)e)->xproperty;
-		if(ev->atom == urlprop && ev->state == PropertyNewValue) {
-			if(ignore_once)
-			       ignore_once = FALSE;
-			else {
-				XGetWindowProperty(dpy, ev->window, urlprop, 0L, BUFSIZ, False, XA_STRING,
-					&adummy, &idummy, &ldummy, &ldummy, &buf);
-				loaduri(c, (gchar *)buf);
-				XFree(buf);
-			}
-			return GDK_FILTER_REMOVE;
-		}
-	}
-	return GDK_FILTER_CONTINUE;
+loadfinish(WebKitWebView *view, WebKitWebFrame *f, gpointer d) {
+	/* ??? TODO */
 }
 
 void
-progresschange(WebKitWebView* view, gint p, Client *c) {
-	c->progress = p;
-	updatetitle(c, NULL);
+progresschange(WebKitWebView* view, gint p, gpointer d) {
+	progress = p;
+	updatetitle();
+}
+
+void
+updatetitle() {
+	char t[512];
+	snprintf(t, LENGTH(t), "%s [%i%%]", title, progress);
+	gtk_window_set_title(GTK_WINDOW(win), t);
+}
+
+void
+titlechange(WebKitWebView *v, WebKitWebFrame *f, const gchar *t, gpointer d) {
+	if(title)
+		g_free(title);
+	title = g_strdup(t);
+	updatetitle();
+}
+
+void
+windestroy(GtkWidget* w, gpointer d) {
+	gtk_main_quit();
+}
+
+gboolean
+keypress(GtkWidget* w, GdkEventKey *ev) {
+	/* TODO */
+	return FALSE;
 }
 
 void setup(void) {
-	dpy = GDK_DISPLAY();
-	urlprop = XInternAtom(dpy, "_SURF_URL", False);
+	win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_default_size(GTK_WINDOW(win), 800, 600);
+	gtk_widget_set_name(win, "surf window");
+	browser = gtk_scrolled_window_new(NULL, NULL);
+	g_signal_connect (G_OBJECT(win), "destroy", G_CALLBACK(windestroy), NULL);
+	g_signal_connect (G_OBJECT(win), "key-press-event", G_CALLBACK(keypress), NULL);
+
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(browser),
+			GTK_POLICY_NEVER, GTK_POLICY_NEVER);
+	view = WEBKIT_WEB_VIEW(webkit_web_view_new());
+	gtk_container_add(GTK_CONTAINER(browser), GTK_WIDGET(view));
+
+	g_signal_connect(G_OBJECT(view), "title-changed", G_CALLBACK(titlechange), view);
+	g_signal_connect(G_OBJECT(view), "load-progress-changed", G_CALLBACK(progresschange), view);
+	g_signal_connect(G_OBJECT(view), "load-committed", G_CALLBACK(loadcommit), view);
+	g_signal_connect(G_OBJECT(view), "load-started", G_CALLBACK(loadstart), view);
+	g_signal_connect(G_OBJECT(view), "load-finished", G_CALLBACK(loadfinish), view);
+	g_signal_connect(G_OBJECT(view), "hovering-over-link", G_CALLBACK(linkhover), view);
+	g_signal_connect(G_OBJECT(view), "new-window-policy-decision-requested", G_CALLBACK(newwindow), view);
+	g_signal_connect(G_OBJECT(view), "download-requested", G_CALLBACK(download), view);
+	/* g_signal_connect(G_OBJECT(view), "create-web-view", G_CALLBACK(createwebview), view); */
+
+	gtk_container_add(GTK_CONTAINER(win), browser);
+	gtk_widget_grab_focus(GTK_WIDGET(view));
+	gtk_widget_show_all(win);
 }
 
-void
-showsearch(Client *c) {
-	hideurl(c);
-	gtk_widget_show(c->searchbar);
-	gtk_widget_grab_focus(c->searchbar);
-}
-
-void
-showurl(Client *c) {
-	gchar *uri;
-
-	hidesearch(c);
-	uri = geturi(c);
-	gtk_entry_set_text(GTK_ENTRY(c->urlbar), uri);
-	gtk_widget_show(c->urlbar);
-	gtk_widget_grab_focus(c->urlbar);
-}
-
-void
-stop(Client *c) {
-	if(c->download)
-		webkit_download_cancel(c->download);
-	else
-		webkit_web_view_stop_loading(c->view);
-	c->download = NULL;
-}
-
-void
-titlechange(WebKitWebView *v, WebKitWebFrame *f, const gchar *t, Client *c) {
-	updatetitle(c, t);
-}
-
-void
-usage() {
-	fputs("surf - simple browser\n", stderr);
-	die("usage: surf [-e] [-x] [-u uri] [-f file]\n");
-}
-
-void
-updatetitle(Client *c, const char *title) {
-	gchar *t;
-
-	if(title) {
-		if(c->title)
-			g_free(c->title);
-		c->title = g_strdup(title);
-	}
-	if(c->progress == 100)
-		t = g_strdup(c->title);
-	else
-		t = g_strdup_printf("%s [%i%%]", c->title, c->progress);
-	gtk_window_set_title(GTK_WINDOW(c->win), t);
-	g_free(t);
-
+void cleanup() {
 }
 
 int main(int argc, char *argv[]) {
-	SoupSession *s;
-	Client *c;
-	int o;
-	const gchar *home, *filename;
+	gchar *uri = NULL, *file = NULL;
 
+	ARG {
+	case 'e':
+		embed = TRUE;
+		break;
+	case 'u':
+		if(!(uri = ARGVAL()))
+			goto argerr;
+		break;
+	case 'f':
+		if(!(file = ARGVAL()))
+			goto argerr;
+		break;
+	argerr:
+	default:
+		puts("surf - simple browser");
+		printf("usage: %s [-e] [-u uri] [-f file]", argv[0]);
+		return EXIT_FAILURE;
+	}
+	if(argc != ARGC())
+		goto argerr;
 	gtk_init(NULL, NULL);
 	if (!g_thread_supported())
 		g_thread_init(NULL);
 	setup();
-	while((o = getopt(argc, argv, "vhxeu:f:")) != -1)
-		switch(o) {
-		case 'x':
-			showxid = TRUE;
-			break;
-		case 'e':
-			showxid = TRUE;
-			embed = TRUE;
-			break;
-		case 'u':
-			c = newclient();
-			loaduri(c, optarg);
-			break;
-		case 'f':
-			c = newclient();
-			loadfile(c, optarg);
-			break;
-		case 'v':
-			die("surf-"VERSION", © 2009 surf engineers, see LICENSE for details\n");
-			break;
-		default:
-			usage();
-		}
-	if(optind != argc)
-		usage();
-	if(!clients)
-		newclient();
-
-	/* make dirs */
-	home = g_get_home_dir();
-	filename = g_build_filename(home, ".surf", NULL);
-	g_mkdir_with_parents(filename, 0711);
-	filename = g_build_filename(home, ".surf", "dl", NULL);
-	g_mkdir_with_parents(filename, 0755);
-
-	/* cookie persistance */
-	s = webkit_get_default_session();
-	filename = g_build_filename(home, ".surf", "cookies", NULL);
-	cookiejar = soup_cookie_jar_text_new(filename, FALSE);
-	soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookiejar));
-
+	if(uri)
+		loaduri(uri);
+	else if(file)
+		loadfile(file);
+	setupstdin();
+	updatetitle();
 	gtk_main();
 	cleanup();
 	return EXIT_SUCCESS;
