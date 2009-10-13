@@ -598,6 +598,7 @@ setcookie(char *name, char *val, char *dom, char *path, long exp) {
 void
 setup(void) {
 	SoupSession *s;
+	char *hp;
 
 	gtk_init(NULL, NULL);
 	if (!g_thread_supported())
@@ -617,6 +618,13 @@ setup(void) {
 	s = webkit_get_default_session();
 	cookiejar = soup_cookie_jar_text_new(cookiefile, FALSE);
 	soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookiejar));
+
+	hp = getenv("http_proxy");
+	if (hp != NULL) {
+		SoupURI *proxy;
+		proxy = soup_uri_new(hp);
+		g_object_set (G_OBJECT (s), SOUP_SESSION_PROXY_URI, proxy, NULL);
+	}
 }
 
 void
