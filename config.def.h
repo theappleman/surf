@@ -3,7 +3,7 @@ static gchar *progress       = "#FF0000";
 static gchar *progress_trust = "#00FF00";
 static gchar *stylefile      = ".surf/style.css";
 static gchar *scriptfile     = ".surf/script.js";
-static gchar *cookiefile     = ".surf/cookie.txt";
+static gchar *cookiefile     = ".surf/cookies.txt";
 static gchar *dldir          = ".surf/dl";
 static time_t sessiontime    = 31557600;
 
