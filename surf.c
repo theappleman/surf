@@ -749,7 +749,7 @@ int main(int argc, char *argv[]) {
 			break;
 		else if(!strcmp(argv[i], "-v"))
 			die("surf-"VERSION", © 2009 surf engineers, see LICENSE for details\n");
-		else if(argv[i][0] == '-')
+		else if(argv[i][0] == '-' && strlen(argv[i]) > 1)
 			usage();
 		else
 			arg.v = argv[i];
