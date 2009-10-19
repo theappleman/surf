@@ -87,6 +87,8 @@ static void linkhover(WebKitWebView* page, const gchar* t, const gchar* l, Clien
 static void loadcommit(WebKitWebView *view, WebKitWebFrame *f, Client *c);
 static void loadstart(WebKitWebView *view, WebKitWebFrame *f, Client *c);
 static void loadfile(Client *c, const gchar *f);
+static void loadfinished(WebKitWebView *v, WebKitWebFrame *f, Client *c);
+static void loadstart(WebKitWebView *v, WebKitWebFrame *f, Client *c);
 static void loaduri(Client *c, const Arg *arg);
 static void navigate(Client *c, const Arg *arg);
 static Client *newclient(void);
@@ -102,6 +104,7 @@ static void reloadcookie(void);
 static void setcookie(char *name, char *val, char *dom, char *path, long exp);
 static void setup(void);
 static void titlechange(WebKitWebView* view, WebKitWebFrame* frame, const gchar* title, Client *c);
+static void setup(void);
 static void scroll(Client *c, const Arg *arg);
 static void searchtext(Client *c, const Arg *arg);
 static void source(Client *c, const Arg *arg);
@@ -333,7 +336,13 @@ loadcommit(WebKitWebView *view, WebKitWebFrame *f, Client *c) {
 }
 
 void
+loadfinished(WebKitWebView *v, WebKitWebFrame *f, Client *c) {
+	reloadcookie();
+}
+
+void
 loadstart(WebKitWebView *view, WebKitWebFrame *f, Client *c) {
+	reloadcookie();
 	c->progress = 0;
 	update(c);
 }
@@ -424,6 +433,7 @@ newclient(void) {
 	c->view = WEBKIT_WEB_VIEW(webkit_web_view_new());
 	g_signal_connect(G_OBJECT(c->view), "title-changed", G_CALLBACK(titlechange), c);
 	g_signal_connect(G_OBJECT(c->view), "load-progress-changed", G_CALLBACK(progresschange), c);
+	g_signal_connect(G_OBJECT(c->view), "load-finished", G_CALLBACK(loadfinished), c);
 	g_signal_connect(G_OBJECT(c->view), "load-committed", G_CALLBACK(loadcommit), c);
 	g_signal_connect(G_OBJECT(c->view), "load-started", G_CALLBACK(loadstart), c);
 	g_signal_connect(G_OBJECT(c->view), "hovering-over-link", G_CALLBACK(linkhover), c);
@@ -591,6 +601,7 @@ reloadcookie(void) {
 	}
 	soup_cookies_free(l);
 	soup_date_free(e);
+
 	/* This forces the cookie to be written to hdd */
 	s = webkit_get_default_session();
 	soup_session_remove_feature(s, SOUP_SESSION_FEATURE(cookiejar));
