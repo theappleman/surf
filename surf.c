@@ -98,7 +98,7 @@ static void proccookies(SoupMessage *m, Client *c);
 static void progresschange(WebKitWebView *view, gint p, Client *c);
 static void request(SoupSession *s, SoupMessage *m, Client *c);
 static void reload(Client *c, const Arg *arg);
-static void rereadcookies(void);
+static void reloadcookie(void);
 static void setcookie(char *name, char *val, char *dom, char *path, long exp);
 static void setup(void);
 static void titlechange(WebKitWebView* view, WebKitWebFrame* frame, const gchar* title, Client *c);
@@ -543,7 +543,7 @@ proccookies(SoupMessage *m, Client *c) {
 	SoupCookie *co;
 	long t;
 
-	rereadcookies();
+	reloadcookie();
 	for (l = soup_cookies_from_response(m); l; l = l->next){
 		co = (SoupCookie *)l->data;
 		t = co->expires ?  soup_date_to_time_t(co->expires) : 0;
@@ -574,8 +574,28 @@ reload(Client *c, const Arg *arg) {
 }
 
 void
-rereadcookies(void) {
-}
+reloadcookie(void) {
+	GSList *p, *l;
+	SoupCookie *c;
+	SoupSession *s;
+	SoupDate *e;
+
+	e = soup_date_new_from_time_t(time(NULL) + sessiontime);
+	for(l = p = soup_cookie_jar_all_cookies(cookiejar); p; p = p->next) {
+		c = (SoupCookie *)l->data;
+		if(c->expires == NULL) {
+			soup_cookie_set_expires(c, e);
+			soup_cookie_jar_add_cookie(cookiejar,
+					soup_cookie_copy(c));
+		}
+	}
+	soup_cookies_free(l);
+	soup_date_free(e);
+	/* This forces the cookie to be written to hdd */
+	s = webkit_get_default_session();
+	soup_session_remove_feature(s, SOUP_SESSION_FEATURE(cookiejar));
+	soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookiejar));
+} 
 
 void
 scroll(Client *c, const Arg *arg) {
